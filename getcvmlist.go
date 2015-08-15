@@ -12,6 +12,7 @@ import "sync"
 import "time"
 import "math/rand"
 import "bytes"
+import "cvmcode"
 
 type CgwConfig struct {
 	Gz string	// guangzhou
@@ -73,10 +74,16 @@ func parseParams(r *http.Request) (int, string, string) {
     return app_id, owner_uin, district
 }
 
-type CgwResp struct {
+type Resp0 struct {
 	code int
 	message string
-	data interface{}
+	data string
+}
+
+type Resp1 struct {
+	code int
+	message string
+	data []interface{}
 }
 
 func preparePostData(start_idx, end_idx, app_id int, owner_uin string) (string, int) {
@@ -114,8 +121,10 @@ func preparePostData(start_idx, end_idx, app_id int, owner_uin string) (string, 
 
 // pack request and send request to cgw
 // in any case, there should be a resp written to response channel
-func requestInterface(start_idx, end_idx, app_id int, owner_uin, interface_name string, ch chan<- CgwResp) {
-	resp := CgwResp {
+func requestInterface(start_idx, end_idx, app_id int, owner_uin, interface_name string, ch chan<- Resp0) {
+	resp := Resp0 {
+		code: cvmcode.OK,
+		message: "ok",
 		data: "",
 	}
 	// prepare request data
@@ -154,18 +163,52 @@ func requestInterface(start_idx, end_idx, app_id int, owner_uin, interface_name 
 		ch <- resp
 		return
 	}
-	bodystr := string(body);
-	fmt.Println("response -> ", bodystr)
-	// parse response and make resp
-	resp_jdata, err := sjson.NewJson([]byte(bodystr))
-	if err != nil {
-		resp.code = cvmcode.PARSE_CGW_RESPONSE__FAIL
-		resp.message = "cgw response is not json"
-		ch <- resp
-		return
-	}
-	if 
+	resp.data = string(body);
+	fmt.Println("response -> ", resp.data)
+	// response ok
+	// do not parse response here
+	// check detailed response info in collecting procedure
 	ch <- resp
+}
+
+// read from cgw response channel, deal with it
+// return = 0 : done
+// return > 0 : check if need get remaining cvms
+func dealCgwResponse(ch <-chan Resp0, resp1 *Resp1) (int) {
+	var resp0 Resp0
+	select {
+		case resp0 = <-ch:
+		case <-time.After(time.Second * 2):
+			// timeout : 2 seconds
+			// set code & msg
+			resp1.code = cvmcode.CGW_TIMEOUT
+			resp1.message = "cgw timeout"
+			return 0
+	}
+	resp1.code = resp0.code
+	resp1.message = resp0.message
+	// directly return if any error occurs
+	if resp1.code != cvmcode.OK {
+		return 0
+	}
+	// parse cgw response
+	cgw_jdata, err := sjson.NewJson([]byte(resp0.data))
+	if err != nil {
+		resp1.code = cvmcode.PARSE_CGW_RESPONSE__FAIL
+		resp1.message = "parse cgw response fail"
+		return 0
+	}
+	resp1.code = cgw_jdata.Get("returnCode").MustInt(cvmcode.CGW_NO_RETURNCODE)
+	// directly return if cgw returns error
+	if resp1.code != cvmcode.OK {
+		resp1.message = cgw_jdata.Get("returnMessage").MustString("on return msg")
+		return 0
+	}
+	// get cvm data
+	cvms := cgw_jdata.Get("data").MustMap()
+	total_cvm_num := int(cvms["totalNum"])
+	resp1.data = []interface{}(cvms["deviceList"])
+	return total_cvm_num
 }
 
 func processGetCvmList(app_id int, owner_uin, district string) []interface{} {
@@ -189,7 +232,7 @@ func processGetCvmList(app_id int, owner_uin, district string) []interface{} {
 	}
 	interface_num := len(interface_list)
 	// wait for all the interface to return
-	collect_ch := make(chan Resp, interface_num)
+	collect_ch := make(chan Resp1, interface_num)
 	var wait_group sync.WaitGroup
 	wait_group.Add(interface_num)
 	// calling multiple interfaces concurrently
@@ -200,17 +243,26 @@ func processGetCvmList(app_id int, owner_uin, district string) []interface{} {
 			start_idx := 0
 			end_idx := 1024
 			// for timeout control and result retrive
-			ch := make(chan Resp, 1)
+			ch := make(chan Resp0, 1)
 			// POST request in goroutine
 			go requestInterface(start_idx, end_idx, app_id, owner_uin, interface_name, ch)
-			select {
-				case resp := <-ch:
-					// collect response
-					collect_ch <- resp
-				case <-time.After(time.Second * 2):
-					// timeout : 2 seconds
-					return
+			// no data
+			resp1 := Resp1 {
+				data: make([]interface{}, 0),
 			}
+			total_cvm_num := dealCgwResponse(ch, &resp1)
+			start_idx = end_idx + 1
+			end_idx = total_cvm_num - 1
+			// no more cvms
+			if end_idx < start_idx {
+				collect_ch <- resp1
+				return
+			}
+			// get the ramaining cvms
+			go requestInterface(start_idx, end_idx, app_id, owner_uin, interface_name, ch)
+			dealCgwResponse(ch, &resp1)
+			// response
+			collect_ch <- resp1
 			device_list = append(device_list, interface_name)
 		} (interface_name)
 	}
