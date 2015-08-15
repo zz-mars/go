@@ -1,0 +1,7 @@
+{
+	"Gz":"http://gz.cgateway.tencentyun.com/interfaces/interface.php",
+	"Sh":"http://sh.cgateway.tencentyun.com/interfaces/interface.php",
+	"Hk":"http://hk.cgateway.tencentyun.com/interfaces/interface.php",
+	"Ca":"http://ca.cgateway.tencentyun.com/interfaces/interface.php",
+	"CgwTimeout":4
+}
