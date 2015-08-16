@@ -4,7 +4,8 @@ import "fmt"
 import "strconv"
 import "net/http"
 import "encoding/json"
-import sjson "go-simplejson"
+import sjson "github.com/bitly/go-simplejson"
+import log "github.com/kdar/factorlog"
 import "io/ioutil"
 import "os"
 import "runtime"
@@ -14,23 +15,31 @@ import "math/rand"
 import "bytes"
 import "cvmcode"
 
+type Log struct {
+	Level int
+	File string
+}
+
 type CgwConfig struct {
-	Gz string	// guangzhou
-	Sh string	// shanghai
-	Hk string	// hongkong
-	Ca string	// north america
-	CgwTimeout int	// timeout for cgw request
+	Gz string		// guangzhou
+	Sh string		// shanghai
+	Hk string		// hongkong
+	Ca string		// north america
+	CgwTimeout int	// cgw timeout
+	ListenPort int	// listening port
+	Log Log			// log
 }
 
 // cgw config
 var cgw_conf CgwConfig
-var cgw_timeout int
-
-//var cgw_conf map[string] string
 
 func init() {
-    default_config_file := "cgw.conf"
-	conf_data, err := ioutil.ReadFile(default_config_file)
+	// default config file
+    config_file := "getcvmlist.conf"
+	if len(os.Args) == 2 {
+		config_file = os.Args[1]
+	}
+	conf_data, err := ioutil.ReadFile(config_file)
 	if err != nil {
 		fmt.Printf("read config file fail : %s\n", err)
 		os.Exit(1)
@@ -39,26 +48,25 @@ func init() {
 		fmt.Printf("decode config file fail : %s\n", err)
 		os.Exit(1)
 	}
-	cgw_timeout = cgw_conf.CgwTimeout
+	// use default port if needed
+	if cgw_conf.ListenPort <= 0 {
+		cgw_conf.ListenPort = 20487
+	}
 	fmt.Println(cgw_conf.Gz)
 	fmt.Println(cgw_conf.Sh)
 	fmt.Println(cgw_conf.Hk)
 	fmt.Println(cgw_conf.Ca)
-	fmt.Println(cgw_conf.CgwTimeout)
-//	conf_json, err := sjson.NewJson(conf_data)
-//	if err != nil {
-//		fmt.Printf("new json fail : %s\n", err)
-//		os.Exit(1)
-//	}
-//	map_conf, err := conf_json.Map()
-//	if err != nil {
-//		fmt.Printf("json Map fail : %s\n", err)
-//		os.Exit(1)
-//	}
-//	cgw_conf = map_conf
-//	for dist, cgw_interface := range cgw_conf {
-//		fmt.Println(dist, " => ", cgw_interface)
-//	}
+	fmt.Println("listen port : ", cgw_conf.ListenPort)
+	fmt.Println("log file : ", cgw_conf.Log.File)
+	fmt.Println("log level: ", cgw_conf.Log.Level)
+	logFile, err := os.OpenFile(cgw_conf.Log.File, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		fmt.Printf("open log file %s fail, err : %s\n", cgw_conf.Log.File, err)
+		os.Exit(1)
+	}
+	log.SetOutput(logFile)
+	log.SetFormatter(log.NewStdFormatter("%{Data} %{Time \"15:04:05.000000\"} % {severity}" + " %{File}:%{Line}:%{Function} %{Message}"))
+	log.SetMinMaxSeverity(log.Severity(cgw_conf.Log.Level), log.PANIC)
 	runtime.GOMAXPROCS(runtime.NumCPU())
 }
 
@@ -148,7 +156,7 @@ func requestInterface(start_idx, end_idx, app_id int, owner_uin, interface_name 
 		ch <- resp
 		return
 	}
-	fmt.Println("request -> ", post_data)
+	log.Info("req cgw -> ", post_data)
 	postBytesReader := bytes.NewReader([]byte(post_data))
 	// http client without timeout
     client := &http.Client{}
@@ -374,5 +382,7 @@ func getCvmList(w http.ResponseWriter, req *http.Request) {
 
 func main() {
     http.HandleFunc("/getcvmlist", getCvmList)
-    http.ListenAndServe(":10241", nil)
+	listening := fmt.Sprintf(":%d", cgw_conf.ListenPort)
+	fmt.Println("now listening on ", listening)
+    http.ListenAndServe(listening, nil)
 }
