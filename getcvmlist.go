@@ -65,7 +65,7 @@ func init() {
 		os.Exit(1)
 	}
 	log.SetOutput(logFile)
-	log.SetFormatter(log.NewStdFormatter("%{Data} %{Time \"15:04:05.000000\"} % {severity}" + " %{File}:%{Line}:%{Function} %{Message}"))
+	log.SetFormatter(log.NewStdFormatter("%{Date} %{Time \"15:04:05.000000\"} %{severity}" + " %{File}:%{Line}:%{Function} %{Message}"))
 	log.SetMinMaxSeverity(log.Severity(cgw_conf.Log.Level), log.PANIC)
 	runtime.GOMAXPROCS(runtime.NumCPU())
 }
@@ -156,7 +156,7 @@ func requestInterface(start_idx, end_idx, app_id int, owner_uin, interface_name 
 		ch <- resp
 		return
 	}
-	log.Info("req cgw -> ", post_data)
+	log.Infof("req %s\n%s\n", interface_name, post_data)
 	postBytesReader := bytes.NewReader([]byte(post_data))
 	// http client without timeout
     client := &http.Client{}
@@ -191,7 +191,7 @@ func requestInterface(start_idx, end_idx, app_id int, owner_uin, interface_name 
 		return
 	}
 	resp.data = string(body);
-	fmt.Println("response -> ", resp.data)
+	log.Infof("resp from %s\n%s\n", interface_name, resp.data)
 	// response ok
 	// do not parse response here
 	// check detailed response info in collecting procedure
@@ -262,6 +262,7 @@ func processGetCvmList(app_id int, owner_uin, district string) ([]int, []string,
 		case "all":
 			interface_list = []string{cgw_conf.Gz, cgw_conf.Sh, cgw_conf.Hk, cgw_conf.Ca}
 		default:
+			log.Error("invalid district -> ", district)
 			// return empty list
 			return code_list, message_list, district_list, device_list
 	}
@@ -311,7 +312,7 @@ func processGetCvmList(app_id int, owner_uin, district string) ([]int, []string,
 	for collect_result_done==false {
 		select {
 			case final_result := <-collect_ch:
-				fmt.Println("collect -> ", final_result)
+				log.Info("collect -> ", final_result)
 				// collect cvms in data
 				for _, cvm := range final_result.data {
 					device_list = append(device_list, cvm)
@@ -338,7 +339,7 @@ func packResponse(returnCode int, returnMessage string, code_list []int, message
 	resp.Set("districts", district_list)
 	resp_str, err := resp.EncodePretty()
 	if err != nil {
-		fmt.Println("EncodePretty error")
+		log.Error("EncodePretty error")
 		resp_str = []byte("EncodePretty error")
 	}
 	return resp_str
@@ -350,17 +351,18 @@ func getCvmList(w http.ResponseWriter, req *http.Request) {
 	var resp_str []byte
 	if app_id < 0 {
 		// fail
+		log.Error("invalid app_id : ", app_id)
 		resp_str = packResponse(cvmcode.PARAM_ERR, "param error", nil, nil, nil, nil);
 		w.Write(resp_str)
 		return
 	}
-    //s := fmt.Sprintf("%d : %d : %s\n", app_id, owner_uin, district)
+    log.Infof("get req -> app_id : %d owner_uin : %s district : %s\n", app_id, owner_uin, district)
 	// expect cvm list
     code_list, message_list, district_list, device_list := processGetCvmList(app_id, owner_uin, district)
-	fmt.Println("final code_list => ", code_list)
-	fmt.Println("final message_list => ", message_list)
-	fmt.Println("final district_list => ", district_list)
-	fmt.Println("final device_list => ", device_list)
+	log.Info("final code_list => ", code_list)
+	log.Info("final message_list => ", message_list)
+	log.Info("final district_list => ", district_list)
+	log.Info("final device_list => ", device_list)
 	final_return_code := cvmcode.CGW_INTERFACE_ALL_FAIL
 	final_return_msg := "all cgw interface failed"
 	// return ok if there are any interface returns ok
