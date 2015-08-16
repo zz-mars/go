@@ -83,6 +83,7 @@ type Resp0 struct {
 type Resp1 struct {
 	code int
 	message string
+	district string
 	data []interface{}
 }
 
@@ -119,8 +120,20 @@ func preparePostData(start_idx, end_idx, app_id int, owner_uin string) (string, 
 	return string(bytes), 0
 }
 
+// http://gz.cgateway.tencentyun.com/interfaces/interface.php
+// http://sh.cgateway.tencentyun.com/interfaces/interface.php
+// http://hk.cgateway.tencentyun.com/interfaces/interface.php
+// http://ca.cgateway.tencentyun.com/interfaces/interface.php
+func getDistrictNameFromInterface(interface_name string) string {
+	if len(interface_name) < 9 {
+		return "invalid_interface_name"
+	}
+	return interface_name[7:9]
+}
+
 // pack request and send request to cgw
 // in any case, there should be a resp written to response channel
+// if cgw returns ok, raw data from cgw is stored in resp0.data
 func requestInterface(start_idx, end_idx, app_id int, owner_uin, interface_name string, ch chan<- Resp0) {
 	resp := Resp0 {
 		code: cvmcode.OK,
@@ -149,13 +162,19 @@ func requestInterface(start_idx, end_idx, app_id int, owner_uin, interface_name 
 		return
 	}
 	response, err := client.Do(request)
-	if err != nil || response.StatusCode != 200 {
+	if err != nil {
 		resp.code = cvmcode.DO_REQUEST_FAIL
 		resp.message = "http client: do request to cgw fail"
 		ch <- resp
 		return
 	}
 	defer response.Body.Close()
+	if response.StatusCode != 200 {
+		resp.code = cvmcode.CGW_HTTP_RETRUNCODE_NOT_200
+		resp.message = "http client: cgw http return code not 200"
+		ch <- resp
+		return
+	}
 	body, err := ioutil.ReadAll(response.Body)
 	if err != nil {
 		resp.code = cvmcode.READ_RESPONSE_FAIL
@@ -187,7 +206,7 @@ func dealCgwResponse(ch <-chan Resp0, resp1 *Resp1) (int) {
 	}
 	resp1.code = resp0.code
 	resp1.message = resp0.message
-	// directly return if any error occurs
+	// directly return if any error occurs in http request
 	if resp1.code != cvmcode.OK {
 		return 0
 	}
@@ -205,30 +224,38 @@ func dealCgwResponse(ch <-chan Resp0, resp1 *Resp1) (int) {
 		return 0
 	}
 	// get cvm data
-	cvms := cgw_jdata.Get("data").MustMap()
-	total_cvm_num := int(cvms["totalNum"])
-	resp1.data = []interface{}(cvms["deviceList"])
-	return total_cvm_num
+	cvm_lists := cgw_jdata.GetPath("data", "deviceList").MustArray(make([]interface{},0));
+	// append to cvm list
+	for _, cvm := range cvm_lists {
+		resp1.data = append(resp1.data, cvm)
+	}
+	// return total number
+	return cgw_jdata.GetPath("data", "totalNum").MustInt(0)
 }
 
-func processGetCvmList(app_id int, owner_uin, district string) []interface{} {
+// return 4 slices
+// code message district devicelist
+func processGetCvmList(app_id int, owner_uin, district string) ([]int, []string, []string, []interface{}) {
+	code_list := make([]int, 0)
+	message_list := make([]string, 0)
+	district_list := make([]string, 0)
     device_list := make([]interface{}, 0)
 	// calling all the interfaces if district == "all"
-	interface_list := make([]string, 0)
+	var interface_list []string
 	switch district {
 		case "gz":
-			interface_list = append(interface_list, cgw_conf.Gz)
+			interface_list = []string{cgw_conf.Gz}
 		case "sh":
-			interface_list = append(interface_list, cgw_conf.Sh)
+			interface_list = []string{cgw_conf.Sh}
 		case "hk":
-			interface_list = append(interface_list, cgw_conf.Hk)
+			interface_list = []string{cgw_conf.Hk}
 		case "ca":
-			interface_list = append(interface_list, cgw_conf.Ca)
+			interface_list = []string{cgw_conf.Ca}
 		case "all":
-			interface_list = append(interface_list, cgw_conf.Gz, cgw_conf.Sh, cgw_conf.Hk, cgw_conf.Ca)
+			interface_list = []string{cgw_conf.Gz, cgw_conf.Sh, cgw_conf.Hk, cgw_conf.Ca}
 		default:
-			// return empty device list
-			return device_list
+			// return empty list
+			return code_list, message_list, district_list, device_list
 	}
 	interface_num := len(interface_list)
 	// wait for all the interface to return
@@ -240,16 +267,20 @@ func processGetCvmList(app_id int, owner_uin, district string) []interface{} {
 		// each with a single goroutine
 		go func(interface_name string) {
 			defer wait_group.Done()
+			// get the first 1024 cvms
 			start_idx := 0
-			end_idx := 1024
+			end_idx := 1023
 			// for timeout control and result retrive
 			ch := make(chan Resp0, 1)
 			// POST request in goroutine
+			// response should be written to ch
 			go requestInterface(start_idx, end_idx, app_id, owner_uin, interface_name, ch)
 			// no data
 			resp1 := Resp1 {
+				district: getDistrictNameFromInterface(interface_name),
 				data: make([]interface{}, 0),
 			}
+			// expect response from ch
 			total_cvm_num := dealCgwResponse(ch, &resp1)
 			start_idx = end_idx + 1
 			end_idx = total_cvm_num - 1
@@ -258,12 +289,11 @@ func processGetCvmList(app_id int, owner_uin, district string) []interface{} {
 				collect_ch <- resp1
 				return
 			}
-			// get the ramaining cvms
+			// get the ramaining cvms in another goroutine
 			go requestInterface(start_idx, end_idx, app_id, owner_uin, interface_name, ch)
 			dealCgwResponse(ch, &resp1)
-			// response
+			// response anyway
 			collect_ch <- resp1
-			device_list = append(device_list, interface_name)
 		} (interface_name)
 	}
 	// wait for all the interface to return
@@ -273,21 +303,31 @@ func processGetCvmList(app_id int, owner_uin, district string) []interface{} {
 	for collect_result_done==false {
 		select {
 			case final_result := <-collect_ch:
-				fmt.Println(final_result)
+				fmt.Println("collect -> ", final_result)
+				// collect cvms in data
+				for _, cvm := range final_result.data {
+					device_list = append(device_list, cvm)
+				}
+				// collect code & message & district
+				code_list = append(code_list, final_result.code)
+				message_list = append(message_list, final_result.message)
+				district_list = append(district_list, final_result.district)
 			default:
 				// done
 				collect_result_done = true
 		}
 	}
-	fmt.Println("done")
-    return device_list
+    return code_list, message_list, district_list, device_list
 }
 
-func packResponse(returnCode int, returnMessage string, data interface{}) []byte{
+func packResponse(returnCode int, returnMessage string, code_list []int, message_list, district_list []string, data interface{}) []byte{
     resp := sjson.New()
 	resp.Set("returnCode", returnCode)
 	resp.Set("returnMessage", returnMessage)
 	resp.Set("data", data)
+	resp.Set("codes", code_list)
+	resp.Set("msgs", message_list)
+	resp.Set("districts", district_list)
 	resp_str, err := resp.EncodePretty()
 	if err != nil {
 		fmt.Println("EncodePretty error")
@@ -297,20 +337,38 @@ func packResponse(returnCode int, returnMessage string, data interface{}) []byte
 }
 
 func getCvmList(w http.ResponseWriter, req *http.Request) {
+	// parse parameters
     app_id, owner_uin, district := parseParams(req)
 	var resp_str []byte
 	if app_id < 0 {
-		resp_str = packResponse(errcode.PARAM_ERR, "param error", nil);
+		// fail
+		resp_str = packResponse(cvmcode.PARAM_ERR, "param error", nil, nil, nil, nil);
 		w.Write(resp_str)
 		return
 	}
     //s := fmt.Sprintf("%d : %d : %s\n", app_id, owner_uin, district)
-    device_list := processGetCvmList(app_id, owner_uin, district)
+	// expect cvm list
+    code_list, message_list, district_list, device_list := processGetCvmList(app_id, owner_uin, district)
+	fmt.Println("final code_list => ", code_list)
+	fmt.Println("final message_list => ", message_list)
+	fmt.Println("final district_list => ", district_list)
+	fmt.Println("final device_list => ", device_list)
+	final_return_code := cvmcode.CGW_INTERFACE_ALL_FAIL
+	final_return_msg := "all cgw interface failed"
+	// return ok if there are any interface returns ok
+	for _, rt_code := range code_list {
+		if rt_code == cvmcode.OK {
+			final_return_code = cvmcode.OK
+			final_return_msg = "ok"
+			break
+		}
+	}
 	device_num := len(device_list)
 	cvms := sjson.New()
 	cvms.Set("totalNum", device_num)
 	cvms.Set("deviceList", device_list)
-	resp_str = packResponse(cvmcode.OK, "ok", cvms)
+	// response
+	resp_str = packResponse(final_return_code, final_return_msg, code_list, message_list, district_list, cvms)
     w.Write(resp_str)
 }
 
